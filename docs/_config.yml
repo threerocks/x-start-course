@@ -1,0 +1,8 @@
+title: X 从 0 到 1 万粉
+description: 7 节实战课 · 课程大纲与教案
+theme: jekyll-theme-cayman
+show_downloads: false
+markdown: kramdown
+kramdown:
+  input: GFM
+  hard_wrap: false
