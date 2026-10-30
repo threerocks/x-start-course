@@ -9,6 +9,116 @@
   const tb = document.querySelector('.toolbar');
   const pad = n => String(n).padStart(2, '0');
   let cur = 0;
+  let isDrawing = false;
+  let activeStroke = null;
+  const annotations = new Map();
+  const drawingTools = document.querySelector('.drawing-tools');
+  const penButton = drawingTools.querySelector('[data-pen]');
+  const drawingOptions = drawingTools.querySelector('.drawing-options');
+  const undoButton = drawingTools.querySelector('[data-undo]');
+  const clearButton = drawingTools.querySelector('[data-clear]');
+  const penColor = drawingTools.querySelector('[data-pen-color]');
+  const penWidth = drawingTools.querySelector('[data-pen-width]');
+
+  const updateDrawingTools = () => {
+    const hasStrokes = !!annotations.get(cur)?.strokes.length;
+    undoButton.disabled = clearButton.disabled = !hasStrokes;
+  };
+  const finishStroke = () => {
+    if (!activeStroke) return;
+    const { canvas, pointerId } = activeStroke;
+    activeStroke = null;
+    if (canvas.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId);
+    updateDrawingTools();
+  };
+  const paintStroke = (context, stroke) => {
+    context.strokeStyle = context.fillStyle = stroke.color;
+    context.lineWidth = stroke.width;
+    context.lineCap = context.lineJoin = 'round';
+    context.beginPath();
+    const [first, ...rest] = stroke.points;
+    if (!rest.length) {
+      context.arc(first.x, first.y, stroke.width / 2, 0, Math.PI * 2);
+      context.fill();
+    } else {
+      context.moveTo(first.x, first.y);
+      rest.forEach(point => context.lineTo(point.x, point.y));
+      context.stroke();
+    }
+  };
+  const getAnnotation = () => {
+    if (annotations.has(cur)) return annotations.get(cur);
+    const canvas = document.createElement('canvas');
+    canvas.className = 'drawing-canvas';
+    canvas.width = 1920;
+    canvas.height = 1080;
+    canvas.setAttribute('aria-hidden', 'true');
+    slides[cur].appendChild(canvas);
+    const annotation = { canvas, context: canvas.getContext('2d'), strokes: [] };
+    annotations.set(cur, annotation);
+    const getPoint = event => {
+      // 使用画布坐标，保证缩放、全屏和窗口变化后笔迹仍贴合课件。
+      const bounds = canvas.getBoundingClientRect();
+      return { x: (event.clientX - bounds.left) * canvas.width / bounds.width,
+        y: (event.clientY - bounds.top) * canvas.height / bounds.height };
+    };
+    canvas.addEventListener('pointerdown', event => {
+      if (!isDrawing || !event.isPrimary || event.button !== 0) return;
+      event.preventDefault();
+      finishStroke();
+      const stroke = { color: penColor.value, width: Number(penWidth.value), points: [getPoint(event)] };
+      annotation.strokes.push(stroke);
+      activeStroke = { canvas, pointerId: event.pointerId, stroke };
+      canvas.setPointerCapture(event.pointerId);
+      paintStroke(annotation.context, stroke);
+      updateDrawingTools();
+    });
+    canvas.addEventListener('pointermove', event => {
+      if (activeStroke?.canvas !== canvas || activeStroke.pointerId !== event.pointerId) return;
+      const samples = event.getCoalescedEvents?.() || [];
+      (samples.length ? samples : [event]).forEach(sample => {
+        const points = activeStroke.stroke.points;
+        const point = getPoint(sample);
+        paintStroke(annotation.context, { ...activeStroke.stroke, points: [points[points.length - 1], point] });
+        points.push(point);
+      });
+    });
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(type => {
+      canvas.addEventListener(type, event => {
+        if (activeStroke?.pointerId === event.pointerId) finishStroke();
+      });
+    });
+    return annotation;
+  };
+  const setDrawing = enabled => {
+    finishStroke();
+    isDrawing = enabled;
+    document.body.classList.toggle('drawing', enabled);
+    penButton.setAttribute('aria-pressed', enabled);
+    drawingOptions.hidden = !enabled;
+    if (enabled) getAnnotation();
+    updateDrawingTools();
+  };
+  penButton.addEventListener('click', () => setDrawing(!isDrawing));
+  drawingTools.addEventListener('click', event => event.stopPropagation());
+  undoButton.addEventListener('click', () => {
+    finishStroke();
+    const annotation = annotations.get(cur);
+    if (!annotation) return;
+    annotation.strokes.pop();
+    annotation.context.clearRect(0, 0, annotation.canvas.width, annotation.canvas.height);
+    annotation.strokes.forEach(stroke => paintStroke(annotation.context, stroke));
+    updateDrawingTools();
+  });
+  clearButton.addEventListener('click', () => {
+    finishStroke();
+    const annotation = annotations.get(cur);
+    if (!annotation) return;
+    annotation.strokes.length = 0;
+    annotation.context.clearRect(0, 0, annotation.canvas.width, annotation.canvas.height);
+    updateDrawingTools();
+  });
+  addEventListener('blur', finishStroke);
 
   // 章节页底部的进度格
   const dividers = slides.filter(s => s.classList.contains('divider'));
@@ -58,6 +168,7 @@
 
   const frags = s => [...s.querySelectorAll('.frag')];
   const show = (n, revealAll = false) => {
+    finishStroke();
     cur = Math.max(0, Math.min(total - 1, n));
     slides.forEach((s, k) => {
       s.classList.toggle('active', k === cur);
@@ -67,6 +178,8 @@
     countUp(slides[cur]);
     bar.style.width = (cur + 1) / total * 100 + '%';
     history.replaceState(null, '', '#' + (cur + 1));
+    if (isDrawing) getAnnotation();
+    updateDrawingTools();
   };
   // 同一个 data-step 的 .frag 一起出现；没写 data-step 的各自一步
   const step = (f, i) => f.dataset.step ?? 'i' + i;
@@ -91,6 +204,7 @@
   };
   const isOverview = () => document.body.classList.contains('overview');
   const overview = on => {
+    if (on) setDrawing(false);
     document.body.classList.toggle('overview', on);
     tb.querySelector('[data-ov]').setAttribute('aria-pressed', on);
     if (on) slides[cur].scrollIntoView({ block: 'center' });
@@ -131,10 +245,13 @@
   addEventListener('resize', () => { if (!isOverview()) fit(); });
 
   addEventListener('keydown', e => {
+    if (e.target.closest('input, select, textarea, [contenteditable]')) return;
+    if (e.target.closest('button') && [' ', 'Enter'].includes(e.key)) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     const k = e.key;
+    if ((k === 'p' || k === 'P') && !isOverview()) { e.preventDefault(); return setDrawing(!isDrawing); }
     if (k === 'o' || k === 'O') return overview(!isOverview());
-    if (k === 'Escape') return overview(false);
+    if (k === 'Escape') return isDrawing ? setDrawing(false) : overview(false);
     if (/^[1-9]$/.test(k) && THEMES[k - 1]) return setTheme(THEMES[k - 1][0]);
     if (k === 't' || k === 'T') {
       const i = THEMES.findIndex(x => x[0] === root.dataset.theme);
@@ -149,6 +266,7 @@
   });
 
   stage.addEventListener('click', e => {
+    if (isDrawing) return;
     if (isOverview()) {
       const s = e.target.closest('.slide');
       if (s) { show(slides.indexOf(s), true); overview(false); }
@@ -159,9 +277,9 @@
   });
 
   let x0 = null;
-  addEventListener('touchstart', e => { x0 = e.touches[0].clientX; }, { passive: true });
+  addEventListener('touchstart', e => { x0 = isDrawing || e.target.closest('.drawing-tools') ? null : e.touches[0].clientX; }, { passive: true });
   addEventListener('touchend', e => {
-    if (x0 === null || isOverview()) return;
+    if (x0 === null || isOverview() || isDrawing) return;
     const dx = e.changedTouches[0].clientX - x0;
     if (Math.abs(dx) > 50) dx < 0 ? next() : prev();
     x0 = null;
